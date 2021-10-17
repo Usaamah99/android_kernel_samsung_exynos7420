@@ -384,7 +384,6 @@ static const struct nla_policy nl80211_policy[NL80211_ATTR_MAX+1] = {
 	[NL80211_ATTR_VENDOR_ID] = { .type = NLA_U32 },
 	[NL80211_ATTR_VENDOR_SUBCMD] = { .type = NLA_U32 },
 	[NL80211_ATTR_VENDOR_DATA] = { .type = NLA_BINARY },
-	[NL80211_ATTR_IFACE_SOCKET_OWNER] = { .type = NLA_FLAG },
 };
 
 /* policy for the key attributes */
@@ -2460,9 +2459,6 @@ static int nl80211_new_interface(struct sk_buff *skb, struct genl_info *info)
 	enum nl80211_iftype type = NL80211_IFTYPE_UNSPECIFIED;
 	u32 flags;
 
-	/* to avoid failing a new interface creation due to pending removal */
-	cfg80211_destroy_ifaces(rdev);
-
 	memset(&params, 0, sizeof(params));
 
 	if (!info->attrs[NL80211_ATTR_IFNAME])
@@ -2506,9 +2502,6 @@ static int nl80211_new_interface(struct sk_buff *skb, struct genl_info *info)
 		nlmsg_free(msg);
 		return PTR_ERR(wdev);
 	}
-
-	if (info->attrs[NL80211_ATTR_IFACE_SOCKET_OWNER])
-		wdev->owner_nlportid = info->snd_portid;
 
 	switch (type) {
 	case NL80211_IFTYPE_MESH_POINT:
@@ -5322,7 +5315,6 @@ static int nl80211_start_sched_scan(struct sk_buff *skb,
 	enum ieee80211_band band;
 	size_t ie_len;
 	struct nlattr *tb[NL80211_SCHED_SCAN_MATCH_ATTR_MAX + 1];
-	s32 default_match_rssi = NL80211_SCAN_RSSI_THOLD_OFF;
 
 	if (!(rdev->wiphy.flags & WIPHY_FLAG_SUPPORTS_SCHED_SCAN) ||
 	    !rdev->ops->sched_scan_start)
@@ -5361,40 +5353,11 @@ static int nl80211_start_sched_scan(struct sk_buff *skb,
 	if (n_ssids > wiphy->max_sched_scan_ssids)
 		return -EINVAL;
 
-	/*
-	 * First, count the number of 'real' matchsets. Due to an issue with
-	 * the old implementation, matchsets containing only the RSSI attribute
-	 * (NL80211_SCHED_SCAN_MATCH_ATTR_RSSI) are considered as the 'default'
-	 * RSSI for all matchsets, rather than their own matchset for reporting
-	 * all APs with a strong RSSI. This is needed to be compatible with
-	 * older userspace that treated a matchset with only the RSSI as the
-	 * global RSSI for all other matchsets - if there are other matchsets.
-	 */
-	if (info->attrs[NL80211_ATTR_SCHED_SCAN_MATCH]) {
+	if (info->attrs[NL80211_ATTR_SCHED_SCAN_MATCH])
 		nla_for_each_nested(attr,
 				    info->attrs[NL80211_ATTR_SCHED_SCAN_MATCH],
-				    tmp) {
-			struct nlattr *rssi;
-
-			err = nla_parse(tb, NL80211_SCHED_SCAN_MATCH_ATTR_MAX,
-					nla_data(attr), nla_len(attr),
-					nl80211_match_policy);
-			if (err)
-				return err;
-			/* add other standalone attributes here */
-			if (tb[NL80211_SCHED_SCAN_MATCH_ATTR_SSID]) {
-				n_match_sets++;
-				continue;
-			}
-			rssi = tb[NL80211_SCHED_SCAN_MATCH_ATTR_RSSI];
-			if (rssi)
-				default_match_rssi = nla_get_s32(rssi);
-		}
-	}
-
-	/* However, if there's no other matchset, add the RSSI one */
-	if (!n_match_sets && default_match_rssi != NL80211_SCAN_RSSI_THOLD_OFF)
-		n_match_sets = 1;
+				    tmp)
+			n_match_sets++;
 
 	if (n_match_sets > wiphy->max_match_sets)
 		return -EINVAL;
@@ -5522,15 +5485,6 @@ static int nl80211_start_sched_scan(struct sk_buff *skb,
 				  nl80211_match_policy);
 			ssid = tb[NL80211_SCHED_SCAN_MATCH_ATTR_SSID];
 			if (ssid) {
-				if (WARN_ON(i >= n_match_sets)) {
-					/* this indicates a programming error,
-					 * the loop above should have verified
-					 * things properly
-					 */
-					err = -EINVAL;
-					goto out_free;
-				}
-
 				if (nla_len(ssid) > IEEE80211_MAX_SSID_LEN) {
 					err = -EINVAL;
 					goto out_free;
@@ -5539,31 +5493,16 @@ static int nl80211_start_sched_scan(struct sk_buff *skb,
 				       nla_data(ssid), nla_len(ssid));
 				request->match_sets[i].ssid.ssid_len =
 					nla_len(ssid);
-				/* special attribute - old implemenation w/a */
-				request->match_sets[i].rssi_thold =
-					default_match_rssi;
-				rssi = tb[NL80211_SCHED_SCAN_MATCH_ATTR_RSSI];
-				if (rssi)
-					request->match_sets[i].rssi_thold =
-						nla_get_s32(rssi);
 			}
+			rssi = tb[NL80211_SCHED_SCAN_MATCH_ATTR_RSSI];
+			if (rssi)
+				request->rssi_thold = nla_get_u32(rssi);
+			else
+				request->rssi_thold =
+						   NL80211_SCAN_RSSI_THOLD_OFF;
 			i++;
 		}
-
-		/* there was no other matchset, so the RSSI one is alone */
-		if (i == 0)
-			request->match_sets[0].rssi_thold = default_match_rssi;
-
-		request->min_rssi_thold = INT_MAX;
-		for (i = 0; i < n_match_sets; i++)
-			request->min_rssi_thold =
-				min(request->match_sets[i].rssi_thold,
-				    request->min_rssi_thold);
-	} else {
-		request->min_rssi_thold = NL80211_SCAN_RSSI_THOLD_OFF;
 	}
-
-	request->rssi_thold = request->min_rssi_thold;
 
 	if (info->attrs[NL80211_ATTR_IE]) {
 		request->ie_len = nla_len(info->attrs[NL80211_ATTR_IE]);
@@ -5591,9 +5530,6 @@ static int nl80211_start_sched_scan(struct sk_buff *skb,
 
 	err = rdev_sched_scan_start(rdev, dev, request);
 	if (!err) {
-		if (info->attrs[NL80211_ATTR_IFACE_SOCKET_OWNER])
-			request->owner_nlportid = info->snd_portid;
-
 		rdev->sched_scan_req = request;
 		nl80211_send_sched_scan(rdev, dev,
 					NL80211_CMD_START_SCHED_SCAN);
@@ -5940,7 +5876,9 @@ static int nl80211_dump_survey(struct sk_buff *skb,
 static bool nl80211_valid_wpa_versions(u32 wpa_versions)
 {
 	return !(wpa_versions & ~(NL80211_WPA_VERSION_1 |
-				  NL80211_WPA_VERSION_2));
+				  NL80211_WPA_VERSION_2 |
+/*SEC_PRODUCT_FEATURE_WLAN_SUPPORT_WAPI*/
+				  NL80211_WAPI_VERSION_1 ));
 }
 
 static int nl80211_authenticate(struct sk_buff *skb, struct genl_info *info)
@@ -6706,6 +6644,9 @@ void __cfg80211_send_event_skb(struct sk_buff *skb, gfp_t gfp)
 	void *hdr = ((void **)skb->cb)[1];
 	struct nlattr *data = ((void **)skb->cb)[2];
 
+	/* clear CB data for netlink core to own from now on */
+	memset(skb->cb, 0, sizeof(skb->cb));
+
 	nla_nest_end(skb, data);
 	genlmsg_end(skb, hdr);
 
@@ -7302,7 +7243,16 @@ static int nl80211_tx_mgmt(struct sk_buff *skb, struct genl_info *info)
 		 * of time (10ms) but no longer than the driver supports.
 		 */
 		if (wait < NL80211_MIN_REMAIN_ON_CHANNEL_TIME ||
+#if defined(CONFIG_BROADCOM_WIFI)
+			/* To reduce GAS initial request / response time, 
+			 * we modified the Broadcom official driver structure 
+			 * ex) wait[31:25] -> retry counts until receiving ACK 
+			 *     wait[24:0] -> wait time
+			 */
+			(wait & 0x00ffffff) > rdev->wiphy.max_remain_on_channel_duration)
+#else
 		    wait > rdev->wiphy.max_remain_on_channel_duration)
+#endif
 			return -EINVAL;
 
 	}
@@ -10256,7 +10206,8 @@ void cfg80211_mgmt_tx_status(struct wireless_dev *wdev, u64 cookie,
 
 	genlmsg_end(msg, hdr);
 
-	genlmsg_multicast(msg, 0, nl80211_mlme_mcgrp.id, gfp);
+	genlmsg_multicast_netns(wiphy_net(&rdev->wiphy), msg, 0,
+				nl80211_mlme_mcgrp.id, gfp);
 	return;
 
  nla_put_failure:
@@ -10899,21 +10850,8 @@ static int nl80211_netlink_notify(struct notifier_block * nb,
 	rcu_read_lock();
 
 	list_for_each_entry_rcu(rdev, &cfg80211_rdev_list, list) {
-		bool schedule_destroy_work = false;
-		bool schedule_scan_stop = false;
-		struct cfg80211_sched_scan_request *sched_scan_req =
-			rcu_dereference(rdev->sched_scan_req);
-
-		if (sched_scan_req && notify->portid &&
-		    sched_scan_req->owner_nlportid == notify->portid)
-			schedule_scan_stop = true;
-
-		list_for_each_entry_rcu(wdev, &rdev->wdev_list, list) {
+		list_for_each_entry_rcu(wdev, &rdev->wdev_list, list)
 			cfg80211_mlme_unregister_socket(wdev, notify->portid);
-
-			if (wdev->owner_nlportid == notify->portid)
-				schedule_destroy_work = true;
-		}
 
 		spin_lock_bh(&rdev->beacon_registrations_lock);
 		list_for_each_entry_safe(reg, tmp, &rdev->beacon_registrations,
@@ -10925,25 +10863,6 @@ static int nl80211_netlink_notify(struct notifier_block * nb,
 			}
 		}
 		spin_unlock_bh(&rdev->beacon_registrations_lock);
-
-		if (schedule_destroy_work) {
-			struct cfg80211_iface_destroy *destroy;
-
-			destroy = kzalloc(sizeof(*destroy), GFP_ATOMIC);
-			if (destroy) {
-				destroy->nlportid = notify->portid;
-				spin_lock(&rdev->destroy_list_lock);
-				list_add(&destroy->list, &rdev->destroy_list);
-				spin_unlock(&rdev->destroy_list_lock);
-				schedule_work(&rdev->destroy_work);
-			}
-		} else if (schedule_scan_stop) {
-			sched_scan_req->owner_nlportid = 0;
-
-			if (rdev->ops->sched_scan_stop &&
-			    rdev->wiphy.flags & WIPHY_FLAG_SUPPORTS_SCHED_SCAN)
-				schedule_work(&rdev->sched_scan_stop_wk);
-		}
 	}
 
 	rcu_read_unlock();

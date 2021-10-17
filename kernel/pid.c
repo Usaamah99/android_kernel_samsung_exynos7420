@@ -264,6 +264,7 @@ void free_pid(struct pid *pid)
 		struct pid_namespace *ns = upid->ns;
 		hlist_del_rcu(&upid->pid_chain);
 		switch(--ns->nr_hashed) {
+		case 2:
 		case 1:
 			/* When all that is left in the pid namespace
 			 * is the reaper wake up the reaper.  The reaper
@@ -521,7 +522,7 @@ pid_t __task_pid_nr_ns(struct task_struct *task, enum pid_type type,
 		if (type != PIDTYPE_PID) {
 			if (type == __PIDTYPE_TGID)
 				type = PIDTYPE_PID;
-			task = task->group_leader;
+ 			task = task->group_leader;
 		}
 		nr = pid_nr_ns(task->pids[type].pid, ns);
 	}

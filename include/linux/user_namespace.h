@@ -23,6 +23,7 @@ struct user_namespace {
 	struct uid_gid_map	projid_map;
 	atomic_t		count;
 	struct user_namespace	*parent;
+	int			level;
 	kuid_t			owner;
 	kgid_t			group;
 	unsigned int		proc_inum;
@@ -58,6 +59,7 @@ extern struct seq_operations proc_projid_seq_operations;
 extern ssize_t proc_uid_map_write(struct file *, const char __user *, size_t, loff_t *);
 extern ssize_t proc_gid_map_write(struct file *, const char __user *, size_t, loff_t *);
 extern ssize_t proc_projid_map_write(struct file *, const char __user *, size_t, loff_t *);
+extern bool userns_may_setgroups(const struct user_namespace *ns);
 #else
 
 static inline struct user_namespace *get_user_ns(struct user_namespace *ns)
@@ -82,6 +84,10 @@ static inline void put_user_ns(struct user_namespace *ns)
 {
 }
 
+static inline bool userns_may_setgroups(const struct user_namespace *ns)
+{
+	return true;
+}
 #endif
 
 void update_mnt_policy(struct user_namespace *userns);
